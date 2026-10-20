@@ -1,9 +1,10 @@
 use std::{
+    collections::VecDeque,
     env,
     io::Read,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -42,6 +43,15 @@ struct Config {
     upstream: SocketAddr,
     origin: String,
     authority: String,
+    rpc_rate_limit: u32,
+}
+
+fn parse_rpc_rate_limit(value: &str) -> Result<u32, &'static str> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|limit| *limit > 0)
+        .ok_or("CVSE_RPC_RATE_LIMIT must be a positive integer (connections per second)")
 }
 
 impl Config {
@@ -64,6 +74,11 @@ impl Config {
             return Err("CVSE_RELAY_ORIGIN must be an exact http(s) origin without path, credentials or trailing slash".into());
         }
         let authority = uri.authority().unwrap().as_str().to_owned();
+        let rpc_rate_limit = match env::var("CVSE_RPC_RATE_LIMIT") {
+            Ok(value) => parse_rpc_rate_limit(&value)?,
+            Err(env::VarError::NotPresent) => 10,
+            Err(error) => return Err(Box::new(error)),
+        };
         if !listen.ip().is_loopback() && env::var_os("CVSE_RELAY_ORIGIN").is_none() {
             return Err("non-loopback listen requires explicit CVSE_RELAY_ORIGIN".into());
         }
@@ -72,7 +87,38 @@ impl Config {
             upstream,
             origin,
             authority,
+            rpc_rate_limit,
         })
+    }
+}
+
+// One window for the entire process: never key RPC admission by IP or user.
+struct RpcRateLimiter {
+    limit: u32,
+    attempts: Mutex<VecDeque<Instant>>,
+}
+
+impl RpcRateLimiter {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit,
+            attempts: Mutex::new(VecDeque::new()),
+        }
+    }
+
+    fn allow(&self, now: Instant) -> bool {
+        let mut attempts = self.attempts.lock().expect("RPC rate limiter poisoned");
+        while attempts
+            .front()
+            .is_some_and(|first| now.duration_since(*first) >= Duration::from_secs(1))
+        {
+            attempts.pop_front();
+        }
+        if attempts.len() >= self.limit as usize {
+            return false;
+        }
+        attempts.push_back(now);
+        true
     }
 }
 
@@ -82,6 +128,7 @@ struct AppState {
     config: Config,
     connections: Arc<Semaphore>,
     files: Arc<Semaphore>,
+    rpc_limiter: RpcRateLimiter,
 }
 
 fn allowed(headers: &HeaderMap, state: &AppState, require_origin: bool) -> bool {
@@ -209,6 +256,14 @@ async fn rpc(
     let Ok(permit) = state.connections.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    if !state.rpc_limiter.allow(Instant::now()) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, "1")],
+            "RPC connection rate limit exceeded",
+        )
+            .into_response();
+    }
     let upstream = match time::timeout(IO_TIMEOUT, TcpStream::connect(state.config.upstream)).await
     {
         Ok(Ok(stream)) => stream,
@@ -289,6 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState {
         root,
         static_root,
+        rpc_limiter: RpcRateLimiter::new(config.rpc_rate_limit),
         config,
         connections: Arc::new(Semaphore::new(16)),
         files: Arc::new(Semaphore::new(32)),
@@ -336,10 +392,41 @@ mod tests {
                 upstream: "127.0.0.1:2".parse().unwrap(),
                 origin: "http://127.0.0.1:1".into(),
                 authority: "127.0.0.1:1".into(),
+                rpc_rate_limit: 10,
             },
             connections: Arc::new(Semaphore::new(16)),
             files: Arc::new(Semaphore::new(32)),
+            rpc_limiter: RpcRateLimiter::new(10),
         }
+    }
+
+    #[test]
+    fn rpc_rate_limit_is_global_and_uses_a_sliding_second() {
+        let limiter = RpcRateLimiter::new(10);
+        let start = Instant::now();
+        for _ in 0..10 {
+            assert!(limiter.allow(start));
+        }
+        assert!(!limiter.allow(start));
+        assert!(!limiter.allow(start + Duration::from_millis(999)));
+        for _ in 0..10 {
+            assert!(limiter.allow(start + Duration::from_secs(1)));
+        }
+        assert!(!limiter.allow(start + Duration::from_secs(1)));
+
+        let sliding = RpcRateLimiter::new(2);
+        assert!(sliding.allow(start));
+        assert!(sliding.allow(start + Duration::from_millis(500)));
+        assert!(sliding.allow(start + Duration::from_secs(1)));
+        assert!(!sliding.allow(start + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn invalid_rpc_rate_limit_fails_configuration() {
+        for invalid in ["", "0", "-1", "1.5", "abc", "4294967296"] {
+            assert!(parse_rpc_rate_limit(invalid).is_err());
+        }
+        assert_eq!(parse_rpc_rate_limit("20"), Ok(20));
     }
 
     #[test]

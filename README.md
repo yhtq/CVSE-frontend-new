@@ -18,7 +18,7 @@ cp -rL result /tmp/cvse-deployment
 
 `cvse-relay` 本身就是 Rust Web server：启动**这一个进程**后，同一监听端口提供 `GET /`（页面）、`GET /static/*`（CSS、JavaScript、图片和 WASM），以及 `GET /rpc`（WebSocket，与固定的 RPC TCP 后端双向转发）。**无需另起静态文件服务或单独启动 relay 进程。**默认监听 `127.0.0.1:25126`，可直接访问 [http://127.0.0.1:25126/](http://127.0.0.1:25126/)；目标机须能连接 RPC 后端的 TCP 端口。
 
-可用 `CVSE_RELAY_LISTEN`、`CVSE_RELAY_UPSTREAM`、`CVSE_RELAY_ORIGIN` 配置监听、上游和浏览器来源。如果调整包内目录布局，可用 `CVSE_RELAY_ROOT` 指向包含 `index.html` 和 `static/` 的目录。公网部署仍须 TLS 反向代理和身份认证：将 `/`、`/static/*` 和支持 WebSocket Upgrade 的 `/rpc` **一起**代理到同一监听端口，并将 `CVSE_RELAY_ORIGIN` 设置为外部 HTTPS 来源；详见 [relay 说明](relay/README.md)。
+可用 `CVSE_RELAY_LISTEN`、`CVSE_RELAY_UPSTREAM`、`CVSE_RELAY_ORIGIN` 配置监听、上游和浏览器来源。`CVSE_RPC_RATE_LIMIT` 配置全部用户共享的 `/rpc` 新连接限速（默认每秒 10 次），超过上限返回 HTTP 429；它不统计一条连接内部的 RPC 方法次数。如果调整包内目录布局，可用 `CVSE_RELAY_ROOT` 指向包含 `index.html` 和 `static/` 的目录。公网部署仍须 TLS 反向代理和身份认证：将 `/`、`/static/*` 和支持 WebSocket Upgrade 的 `/rpc` **一起**代理到同一监听端口，并将 `CVSE_RELAY_ORIGIN` 设置为外部 HTTPS 来源；详见 [relay 说明](relay/README.md)。
 
 每次向任意分支推送提交，[发布工作流](.github/workflows/release.yml) 都会运行 Nix 构建，并以该提交 SHA 自动创建 `build-<sha>` 预发布版本（无需手动打标签），附加 `cvse-frontend-linux-x86_64.tar.gz`。下载后解压并运行 `cvse-frontend/bin/cvse-relay`；压缩包包含网页和 WASM，不需要在部署机器上构建。仓库的 Actions 工作流需要 `contents: write` 权限才能创建 Release。
 
