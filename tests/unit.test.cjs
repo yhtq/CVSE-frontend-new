@@ -360,7 +360,7 @@ test('WASM auth, numeric parameters, retry and read-only validation', async t =>
  w.__request=async (method, params, auth) => {
   calls.push({method,params,auth});
   if(method==='getVideos' && calls.filter(c=>c.method==='getVideos').length===1) throw new Error('connection failed');
-  return {success:true,data:{has_next:false,next_cursor:null},total:0};
+  return {success:true,data:method==='getVideos'?[]:{has_next:false,next_cursor:null},total:0};
  };
  await assert.rejects(w.getVideos({page:2,page_size:20}),/connection failed/);
  await w.getVideos({page:2,page_size:20});
@@ -371,6 +371,17 @@ test('WASM auth, numeric parameters, retry and read-only validation', async t =>
  const validation=await w.validateAuthKey('secret');
  assert.equal(validation.valid,false);assert.match(validation.message,/只读 RPC 无法验证/);
  assert.equal(calls.length,3);
+});
+
+test('malformed WASM video result reports deployment mismatch and allows a retry', async t => {
+ const {w}=await setup(t);let calls=0;
+ w.__request=async method=>{
+  if(method==='getVideos')return ++calls===1?new Map([['success',true],['data',[]]]):{success:true,data:[],total:0};
+  return {success:true};
+ };
+ await assert.rejects(w.getVideos({keyword:'search'}),/重新构建并部署 WASM/);
+ assert.deepEqual(clean((await w.getVideos({keyword:'search'})).data),[]);
+ assert.equal(calls,2);
 });
 
 function themeSetup(t, { saved = null, dark = false, blockedStorage = false } = {}) {

@@ -7,6 +7,7 @@ mod CVSE_capnp {
     include!(concat!(env!("OUT_DIR"), "/CVSE_capnp.rs"));
 }
 use capnp_rpc::{rpc_twoparty_capnp, twoparty, RpcSystem};
+use serde::Serialize;
 use serde_json::{json, Value};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
@@ -551,7 +552,10 @@ pub async fn request(
     });
     let result = dispatch(&client, &method, &p, auth.as_deref().unwrap_or("")).await;
     drop(socket);
-    serde_wasm_bindgen::to_value(&result.map_err(|e| JsValue::from_str(&e))?)
+    // The page expects result.data, not the default JS Map's result.get("data").
+    result
+        .map_err(|e| JsValue::from_str(&e))?
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
         .map_err(|e| JsValue::from_str(&e.to_string()))
 }
 

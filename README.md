@@ -12,7 +12,13 @@ cp -rL result /tmp/cvse-deployment
 /tmp/cvse-deployment/bin/cvse-relay
 ```
 
-构建结果 `result/` 包含静态链接的 `bin/cvse-relay`、`share/cvse-frontend/index.html`、完整的 `static/` 和编译好的 WASM。**搬迁时必须复制整个目录**（不能只复制 `bin/` 或 Nix 的 `result` 符号链接）；在相同 CPU 架构的另一台 Linux 上执行 `bin/cvse-relay`，无需 Nix 或动态 libc。默认监听 `127.0.0.1:25126`，可用 `CVSE_RELAY_LISTEN`、`CVSE_RELAY_UPSTREAM`、`CVSE_RELAY_ORIGIN` 配置；如果调整目录布局，可用 `CVSE_RELAY_ROOT` 指向包含 `index.html` 和 `static/` 的目录。公网部署仍须 TLS 反向代理和身份认证，目标机需要能连接 RPC 后端的 TCP 端口。也可分别构建 `.#relay` 和 `.#wasm`，但迁移请使用包含全部资源的 `#default`。
+构建结果 `result/` 包含静态链接的 `bin/cvse-relay`、`share/cvse-frontend/index.html`、完整的 `static/` 和编译好的 WASM。**搬迁时必须复制整个目录**（不能只复制 `bin/` 或 Nix 的 `result` 符号链接）；在相同 CPU 架构的另一台 Linux 上执行 `bin/cvse-relay`，无需 Nix 或动态 libc。也可分别构建 `.#relay` 和 `.#wasm`，但迁移请使用包含全部资源的 `#default`。
+
+### 单进程启动与访问
+
+`cvse-relay` 本身就是 Rust Web server：启动**这一个进程**后，同一监听端口提供 `GET /`（页面）、`GET /static/*`（CSS、JavaScript、图片和 WASM），以及 `GET /rpc`（WebSocket，与固定的 RPC TCP 后端双向转发）。**无需另起静态文件服务或单独启动 relay 进程。**默认监听 `127.0.0.1:25126`，可直接访问 [http://127.0.0.1:25126/](http://127.0.0.1:25126/)；目标机须能连接 RPC 后端的 TCP 端口。
+
+可用 `CVSE_RELAY_LISTEN`、`CVSE_RELAY_UPSTREAM`、`CVSE_RELAY_ORIGIN` 配置监听、上游和浏览器来源。如果调整包内目录布局，可用 `CVSE_RELAY_ROOT` 指向包含 `index.html` 和 `static/` 的目录。公网部署仍须 TLS 反向代理和身份认证：将 `/`、`/static/*` 和支持 WebSocket Upgrade 的 `/rpc` **一起**代理到同一监听端口，并将 `CVSE_RELAY_ORIGIN` 设置为外部 HTTPS 来源；详见 [relay 说明](relay/README.md)。
 
 每次向任意分支推送提交，[发布工作流](.github/workflows/release.yml) 都会运行 Nix 构建，并以该提交 SHA 自动创建 `build-<sha>` 预发布版本（无需手动打标签），附加 `cvse-frontend-linux-x86_64.tar.gz`。下载后解压并运行 `cvse-frontend/bin/cvse-relay`；压缩包包含网页和 WASM，不需要在部署机器上构建。仓库的 Actions 工作流需要 `contents: write` 权限才能创建 Release。
 

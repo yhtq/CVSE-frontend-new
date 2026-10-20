@@ -1,6 +1,6 @@
 # CVSE native relay
 
-独立 Rust 服务：`GET /` 返回资源根目录的 `index.html`，`GET /static/...` 读取资源根目录的 `static/`，`GET /rpc` 将 **WebSocket Binary 消息**与 CVSE 原始 TCP 字节流双向转发。不解析、修改或验证 Cap'n Proto / CVSE 消息，不提供 `/api/*`。
+`cvse-relay` 是**单进程 Rust Web server**：启动它即可同时提供 `GET /` 页面、`GET /static/*`（含 WASM）和 `GET /rpc` WebSocket 中继，三者共用同一监听端口。不需要另起一个静态文件服务，也不需要单独启动 relay 子进程。`/rpc` 将 WebSocket Binary 消息与 CVSE 原始 TCP 字节流双向转发，不解析、修改或验证 Cap'n Proto / CVSE 消息；不提供 `/api/*`。
 
 ## 构建、运行、验证
 

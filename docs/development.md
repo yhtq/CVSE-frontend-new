@@ -28,4 +28,4 @@ npm run test:browser
 
 ## 部署核对
 
-运行 `nix build '.?submodules=1#default'` 构建完整的静态 relay + WASM 资源包；`?submodules=1` 是必需的，schema 从 Git 指针指定的 `CVSE-API/` 获取，flake 没有额外的 schema 输入。将 `result` 指向的**整个目录**复制到目标机，并保持 `bin/` 与 `share/` 的相对位置。首先确认 `static/wasm/cvse_wasm_client.js` 和 `static/wasm/cvse_wasm_client_bg.wasm` 已由当前 schema 和源码构建并可被同源静态服务读取；页面应从 `/rpc` 建立 WS/WSS 连接，而非请求 `/api/*`。在权限允许的环境核对一次只读查询和失败后的下一次只读查询；不要因只读成功就认为写入密钥有效。部署时的 TLS、Origin 与上游地址限制参见 [relay 说明](../relay/README.md)。
+运行 `nix build '.?submodules=1#default'` 构建完整的静态 relay + WASM 资源包；`?submodules=1` 是必需的，schema 从 Git 指针指定的 `CVSE-API/` 获取，flake 没有额外的 schema 输入。将 `result` 指向的**整个目录**复制到目标机，并保持 `bin/` 与 `share/` 的相对位置。只需运行 `bin/cvse-relay` 一个进程：它在同一端口提供 `/`、`/static/*` 与 WebSocket `/rpc`，不必另起 Web server；反向代理必须将这三类路径指向同一端口并允许 `/rpc` 的 WebSocket Upgrade。首先确认 `static/wasm/cvse_wasm_client.js` 和 `static/wasm/cvse_wasm_client_bg.wasm` 已由当前 schema 和源码构建并可被同源静态服务读取；页面应从 `/rpc` 建立 WS/WSS 连接，而非请求 `/api/*`。在权限允许的环境核对一次只读查询和失败后的下一次只读查询；不要因只读成功就认为写入密钥有效。部署时的 TLS、Origin 与上游地址限制参见 [relay 说明](../relay/README.md)。

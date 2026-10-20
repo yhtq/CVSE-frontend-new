@@ -33,11 +33,15 @@ export function getVideos(params) {
     if (pendingVideoRequests.has(key)) return pendingVideoRequests.get(key);
     const promise = (async () => {
         try {
-            return await rpcRequest('getVideos', {
+            const result = await rpcRequest('getVideos', {
                 ...Object.fromEntries(query),
                 page: Number(query.get('page') || 1),
                 page_size: Number(query.get('page_size') || 20),
             }, auth);
+            if (!Array.isArray(result?.data)) {
+                throw new Error('RPC 返回的稿件列表格式无效，请重新构建并部署 WASM 与页面资源。');
+            }
+            return result;
         } finally { pendingVideoRequests.delete(key); }
     })();
     pendingVideoRequests.set(key, promise);
