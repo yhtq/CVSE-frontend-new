@@ -1,24 +1,34 @@
 # CVSE 收录管理前端
 
-用于稿件收录、榜单预览校审和批量修改，通过 Python 服务连接现有 CVSE RPC 后端。前端使用原生 HTML、CSS 和 JavaScript，无需打包构建。
+用于稿件收录、榜单预览校审和批量修改。浏览器通过 Rust/WASM 完成 Cap’n Proto RPC 编解码及数据适配；同源 Rust WebSocket 服务只把二进制字节流转发给现有 CVSE TCP RPC 后端，不解析请求。网页需要先构建 WASM。
 
-## 快速开始
+## 部署包（无需在目标机安装 Nix）
 
-需要 Python 3.13 和 [uv](https://docs.uv.dev/)。Nix 用户可先运行 `nix develop`。
+在仓库根目录构建（`?submodules=1` 会按 Git 记录的提交获取 `CVSE-API/` 子模块；新文件须先加入 Git 索引，Nix 才能在 Git flake 中看到它们）：
+
+```bash
+nix build '.?submodules=1#default'
+cp -rL result /tmp/cvse-deployment
+/tmp/cvse-deployment/bin/cvse-relay
+```
+
+构建结果 `result/` 包含静态链接的 `bin/cvse-relay`、`share/cvse-frontend/index.html`、完整的 `static/` 和编译好的 WASM。**搬迁时必须复制整个目录**（不能只复制 `bin/` 或 Nix 的 `result` 符号链接）；在相同 CPU 架构的另一台 Linux 上执行 `bin/cvse-relay`，无需 Nix 或动态 libc。默认监听 `127.0.0.1:25126`，可用 `CVSE_RELAY_LISTEN`、`CVSE_RELAY_UPSTREAM`、`CVSE_RELAY_ORIGIN` 配置；如果调整目录布局，可用 `CVSE_RELAY_ROOT` 指向包含 `index.html` 和 `static/` 的目录。公网部署仍须 TLS 反向代理和身份认证，目标机需要能连接 RPC 后端的 TCP 端口。也可分别构建 `.#relay` 和 `.#wasm`，但迁移请使用包含全部资源的 `#default`。
+
+每次向任意分支推送提交，[发布工作流](.github/workflows/release.yml) 都会运行 Nix 构建，并以该提交 SHA 自动创建 `build-<sha>` 预发布版本（无需手动打标签），附加 `cvse-frontend-linux-x86_64.tar.gz`。下载后解压并运行 `cvse-frontend/bin/cvse-relay`；压缩包包含网页和 WASM，不需要在部署机器上构建。仓库的 Actions 工作流需要 `contents: write` 权限才能创建 Release。
+
+## 本地开发
+
+需要启用 Nix flakes；Rust 编译器（含 `wasm32-unknown-unknown` 标准库）、Cargo、`capnp`、与锁定版本匹配的 `wasm-bindgen-cli` 及 Node 均由根目录 `flake.nix` 提供，不需要 `rustup`。
 
 ```bash
 git submodule update --init --recursive
-uv sync --frozen
-uv run server.py
+nix develop
+cargo build --locked --release --target wasm32-unknown-unknown --manifest-path wasm-client/Cargo.toml
+wasm-bindgen --target web --out-dir static/wasm wasm-client/target/wasm32-unknown-unknown/release/cvse_wasm_client.wasm
+cargo run --locked --release --manifest-path relay/Cargo.toml
 ```
 
-启动后访问 [http://localhost:25123](http://localhost:25123)。运行环境需要能够连接 RPC 后端；地址在 `server.py` 的 `CVSE_HOST`、`CVSE_PORT` 中配置。
-
-| 环境变量 | 默认值 | 用途 |
-| --- | --- | --- |
-| `CVSE_SERVER_HOST` | `0.0.0.0` | 常规服务监听地址 |
-| `CVSE_SERVER_PORT` | `25123` | 常规服务监听端口 |
-| `CVSE_PUBLIC_PORT` | `25125` | 临时公开服务端口，仅用于 `public_server.py` |
+启动后访问 [http://127.0.0.1:25126](http://127.0.0.1:25126)。`static/wasm/` 是构建输出，不提交到仓库；每次更新 WASM 源码或 schema 后要重新构建。`relay/` 默认只监听本机，并连接 `47.104.91.74:8663`，可通过 `CVSE_RELAY_LISTEN`、`CVSE_RELAY_UPSTREAM`、`CVSE_RELAY_ORIGIN` 配置，参见 [relay 说明](relay/README.md)。浏览器请求经同源 `/rpc` WebSocket 中继；部署到 HTTPS 域名时，须用 TLS 反向代理提供 WSS 并设置准确的 `CVSE_RELAY_ORIGIN`。后端 TCP 仍为明文，不宜通过不可信网络传递密钥。
 
 ## 使用说明
 
@@ -49,24 +59,11 @@ uv run server.py
 
 手机端筛选条件可折叠；选择稿件后，顶部单行批量操作栏吸顶，“更多”中提供全选和清空选择。底部待提交栏默认折叠，点击“查看”展开改动列表，点击遮罩或下滑面板顶部收起。编辑时隐藏上下操作栏。
 
-## 临时分享访问
+## 部署与安全
 
-安装 `cloudflared` 后，在两个终端分别运行：
+中继没有 HTTP `/api/*` 接口，也不读取或保存 API Key；WASM 仅在写入 RPC 的 `auth_token` 字段传递浏览器保存的密钥。只读 RPC 不验证写入权限，设置中的“验证”无法确定密钥是否有效；写入权限由 RPC 后端检查。中继严格检查浏览器 `Origin` 和 `Host`，但这**不是身份认证**：开放公网前须在可信 TLS 反向代理处实施用户身份认证、访问限制和限流，确保 WebSocket Upgrade 及静态资源使用相同域名。中继到 RPC 后端仍是明文 TCP。详见 [relay 说明](relay/README.md)。
 
-```bash
-uv run python public_server.py
-```
-
-```bash
-cloudflared tunnel --no-autoupdate --url http://127.0.0.1:25125
-```
-
-将 cloudflared 输出的临时 HTTPS 地址分享给访问者。电脑及两个进程都需要保持运行。若端口被占用，可设置 `CVSE_PUBLIC_PORT`，并同步修改 tunnel 命令中的端口。
-
-`public_server.py` 仅监听本机，不读取默认或文件中的密钥；写入必须携带用户提供的 `X-Auth-Key`。Tunnel 的 HTTPS 不会改变服务到 RPC 后端之间原有的 TCP 连接方式。
-
-修改 Python 代码后需要重启服务才能生效。
-Docker 部署更新后也需要重启或重建对应容器，否则页面可能已更新，但接口仍运行旧代码。部署核对方法见 [开发说明](docs/development.md#部署核对)。
+**连接恢复：**每次页面操作建立新的 WebSocket 和上游 TCP 连接，完成或失败后关闭；失败的 RPC 可能令后端立即关闭 TCP，但后续操作会创建新连接。不会自动重放写入请求（失败时后端可能已执行部分操作），请核对后端状态后手动重试。
 
 ## 开发
 
@@ -74,9 +71,9 @@ Docker 部署更新后也需要重启或重建对应容器，否则页面可能�
 | --- | --- |
 | `index.html` | 页面结构 |
 | `static/` | 样式、交互脚本与图片 |
-| `server.py` | Flask 服务与 RPC 数据适配 |
-| `public_server.py` | 临时公开访问入口 |
-| `rpc_tools/` | RPC 客户端子模块 |
-| `tests/` | Python、前端单元及浏览器测试 |
+| `wasm-client/` | Rust/WASM Cap’n Proto 客户端与页面数据适配 |
+| `relay/` | 静态文件服务与二进制 WebSocket ↔ TCP 中继 |
+| `CVSE-API/CVSE.capnp` | RPC schema（直接子模块） |
+| `tests/` | 前端单元及浏览器测试 |
 
 测试命令、预览分页和请求限制见 [开发说明](docs/development.md)。

@@ -176,5 +176,6 @@ pyrightconfig.json
 # End of https://www.toptal.com/developers/gitignore/api/python
 .pdm-python
 
-# Frontend test dependencies
+# Frontend test dependencies and generated WASM bundle
 node_modules/
+/static/wasm/

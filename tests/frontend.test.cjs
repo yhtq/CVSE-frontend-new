@@ -36,6 +36,20 @@ async function pageFor(t, { delay = {}, width = 1400, previewTotal = entries.len
     await page.route('**/*', async route => {
         const req = route.request(), url = new URL(req.url());
         if (url.origin !== base) return route.abort(); // Never contact production or third parties.
+        if (url.pathname === '/static/wasm/cvse_wasm_client.js') return route.fulfill({ contentType: 'text/javascript', body: `
+            export default async function init() {}
+            export async function request(method, params, auth) {
+                const routes = { getVideos: '/api/videos', getVideo: '/api/video/' + params.bvid,
+                    getRankingPreview: '/api/ranking-preview', submitChanges: '/api/submit-changes',
+                    calculateRankings: '/api/calculate-rankings' };
+                const query = ['getVideos', 'getRankingPreview'].includes(method) ? '?' + new URLSearchParams(params) : '';
+                const write = ['submitChanges', 'calculateRankings'].includes(method);
+                const response = await fetch(routes[method] + query, write ? { method: 'POST', body: JSON.stringify(params) } : {});
+                const result = await response.json();
+                if (!response.ok || result.success === false) throw new Error('HTTP ' + response.status + ' ' + (result.error || 'Request failed'));
+                return result;
+            }
+        ` });
         if (!url.pathname.startsWith('/api/')) return route.continue();
         requests.push({ url, method: req.method(), body: req.postDataJSON() });
         let data;

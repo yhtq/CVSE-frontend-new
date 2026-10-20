@@ -21,8 +21,19 @@ async function setup(t) {
         if (url.startsWith('/api/ranking-preview')) return {ok:true,json:async()=>({success:true,data:{entries:[],stat:{count:2},total:0,has_next:false,next_cursor:null}})};
         return {ok:true,json:async()=>({success:true,data:clean(initial),total:3,stats:{}})};
     };
+    w.__loadWasmClient = async () => ({ default: async () => {}, request: async (method, params, auth) => {
+        if (w.__request) return w.__request(method, params, auth);
+        const routes = { getVideos: '/api/videos', getVideo: `/api/video/${params.bvid}`, getRankingPreview: '/api/ranking-preview', submitChanges: '/api/submit-changes', calculateRankings: '/api/calculate-rankings' };
+        const url = routes[method] + (['getVideos', 'getRankingPreview'].includes(method) ? `?${new URLSearchParams(params)}` : '');
+        const options = ['submitChanges', 'calculateRankings'].includes(method) ? { method: 'POST', body: JSON.stringify(params) } : {};
+        const response = await w.fetch(url, options);
+        const result = await response.json();
+        if (!response.ok || result.success === false) throw new Error(`HTTP ${response.status || 500} ${result.error || 'Request failed'}`);
+        return result;
+    } });
     for(const file of ['utils.js','api.js','renderers.js','app.js']) {
         let source=fs.readFileSync(path.join(root,'static/js',file),'utf8').replace(/^import[\s\S]*?from ['"].*?['"];\n/gm,'').replace(/^export /gm,'');
+        if(file==='api.js') source=source.replace("import('/static/wasm/cvse_wasm_client.js')", 'window.__loadWasmClient()');
         if(file==='api.js') source+='\nwindow.calculateRankingsRequest=calculateRankings; window.submitChangesRequest=submitChanges; window.sendDebugRequestApi=sendDebugRequest;';
         w.eval(source);
     }
@@ -93,11 +104,11 @@ test('late preview response cannot overwrite newer HOT/SH visibility or page req
  doc.querySelector('#previewShowSpecial').checked=true;const old=app.getPreview();
  doc.querySelector('#previewShowSpecial').checked=false;doc.querySelector('#previewIndex').value='2';const latest=app.getPreview();
  const answer=entries=>({ok:true,json:async()=>({success:true,data:{entries,stat:{count:entries.length},total:entries.length,has_next:false,next_cursor:null}})});
- pending[1].resolve(answer([{...video('BV1'),rank:1,specialRank:'normal'}]));await latest;
+ await new Promise(resolve=>setTimeout(resolve,0));pending[1].resolve(answer([{...video('BV1'),rank:1,specialRank:'normal'}]));await latest;
  pending[0].resolve(answer([{...video('BV8'),rank:0,specialRank:'hot'}]));await old;
  assert.equal(app.previewData.entries[0].bvid,'BV1');assert.equal(app.previewShowSpecial,false);assert.ok(!doc.querySelector('#rankingPreview').textContent.includes('HOT'));
  app.previewTotal=40;app.previewPageSize=20;app.previewCursors[2]={rank:21,offset:0};app.previewChangePage(1);
- const newest=app.getPreview();pending[3].resolve(answer([{...video('BV2'),rank:2}]));await newest;
+ const newest=app.getPreview();await new Promise(resolve=>setTimeout(resolve,0));pending[3].resolve(answer([{...video('BV2'),rank:2}]));await newest;
  pending[2].resolve(answer([{...video('BV3'),rank:3}]));await new Promise(resolve=>setTimeout(resolve,0));assert.equal(app.previewData.entries[0].bvid,'BV2');
 });
 
@@ -120,7 +131,7 @@ test('mock submit carries exact exclusion state and unchanged metadata',async t=
 test('changing preview criteria dismisses stale loading and ignores pending response',async t=>{
  const {w,app,doc}=await setup(t);let finish;w.fetch=()=>new Promise(resolve=>finish=resolve);const old=app.getPreview();
  doc.querySelector('#previewRank').value='sv';doc.querySelector('#previewRank').dispatchEvent(new w.Event('change',{bubbles:true}));
- assert.ok(doc.querySelector('#rankingPreview').textContent.includes('预览参数已更改'));finish({ok:true,json:async()=>({success:true,data:{entries:[{...video('BV1'),rank:1}],stat:{count:1},total:1}})});await old;
+ assert.ok(doc.querySelector('#rankingPreview').textContent.includes('预览参数已更改'));await new Promise(resolve=>setTimeout(resolve,0));finish({ok:true,json:async()=>({success:true,data:{entries:[{...video('BV1'),rank:1}],stat:{count:1},total:1}})});await old;
  assert.equal(app.previewData,null);assert.ok(doc.querySelector('#rankingPreview').textContent.includes('预览参数已更改'));
 });
 
@@ -160,8 +171,8 @@ test('UTAU 35 HOT rows with nonzero ranks stay visible with numeric labels on ev
 test('identical in-flight preview clicks share one fetch; changed criteria abort old fetch',async t=>{
  const {w,app,doc}=await setup(t);const pending=[];
  w.fetch=(url,options)=>new Promise(resolve=>pending.push({url,options,resolve}));
- const first=app.getPreview(),again=app.getPreview();assert.equal(pending.length,1);
- doc.querySelector('#previewIndex').value='2';const latest=app.getPreview();assert.equal(pending.length,2);assert.equal(pending[0].options.signal.aborted,true);
+ const first=app.getPreview(),again=app.getPreview();await new Promise(r=>setTimeout(r,0));assert.equal(pending.length,1);
+ doc.querySelector('#previewIndex').value='2';const latest=app.getPreview();await new Promise(r=>setTimeout(r,0));assert.equal(pending.length,2); // WASM cannot abort the socket; the old response must be ignored.
  const answer=bvid=>({ok:true,json:async()=>({success:true,data:{entries:[{...video(bvid),rank:1}],stat:{count:1},total:1,has_next:false,next_cursor:null}})});
  pending[0].resolve(answer('BV1'));await Promise.all([first,again]);
  const sameLatest=app.getPreview();assert.equal(pending.length,2); // old finally must not clear new flight
@@ -171,7 +182,7 @@ test('identical in-flight preview clicks share one fetch; changed criteria abort
 test('preview timeout stops spinner without retrying',async t=>{
  const {w,app,doc}=await setup(t);let calls=0;const original=w.setTimeout.bind(w);
  w.setTimeout=(fn,ms)=>original(fn,ms===40000?0:ms);
- w.fetch=(url,{signal})=>new Promise((resolve,reject)=>{calls++;signal.addEventListener('abort',()=>reject(new w.DOMException('Aborted','AbortError')));});
+ w.fetch=()=>new Promise(()=>{calls++;});
  await app.getPreview();assert.equal(calls,1);assert.match(doc.querySelector('#rankingPreview').textContent,/预览读取超时/);assert.equal(doc.querySelector('#rankingPreview .loading'),null);
 });
 
@@ -341,6 +352,25 @@ test('special rows and truncation notice appear only on first page without fetch
  assert.equal(doc.querySelectorAll('.ranking-row').length,2);assert.ok(!doc.querySelector('#rankingPreview').textContent.includes('超过显示上限'));
  app.previewPage=1;app.renderPreview();assert.equal(doc.querySelectorAll('.ranking-row').length,3);assert.match(doc.querySelector('#rankingPreview').textContent,/超过显示上限/);
  assert.equal(requests.length,before);
+});
+
+test('WASM auth, numeric parameters, retry and read-only validation', async t => {
+ const {w}=await setup(t);const calls=[];
+ w.localStorage.setItem('cvse_api_key','secret');
+ w.__request=async (method, params, auth) => {
+  calls.push({method,params,auth});
+  if(method==='getVideos' && calls.filter(c=>c.method==='getVideos').length===1) throw new Error('connection failed');
+  return {success:true,data:{has_next:false,next_cursor:null},total:0};
+ };
+ await assert.rejects(w.getVideos({page:2,page_size:20}),/connection failed/);
+ await w.getVideos({page:2,page_size:20});
+ assert.equal(calls.length,2);assert.equal(calls[0].auth,'secret');assert.equal(calls[1].auth,'secret');
+ assert.equal(calls[1].params.page,2);assert.equal(calls[1].params.page_size,20);
+ await w.getRankingPreview({rank:'domestic',index:2,page:1,pageSize:20,cursor:{rank:21,offset:3}});
+ assert.equal(calls[2].params.index,2);assert.equal(calls[2].params.cursor_rank,21);assert.equal(calls[2].params.cursor_offset,3);
+ const validation=await w.validateAuthKey('secret');
+ assert.equal(validation.valid,false);assert.match(validation.message,/只读 RPC 无法验证/);
+ assert.equal(calls.length,3);
 });
 
 function themeSetup(t, { saved = null, dark = false, blockedStorage = false } = {}) {

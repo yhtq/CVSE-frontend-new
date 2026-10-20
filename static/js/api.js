@@ -1,46 +1,43 @@
 import { getAuthHeaders } from './utils.js';
 
-async function parseJsonResponse(response, fallbackMessage) {
-    let result;
+let wasmClient;
+
+async function rpcRequest(method, params, auth = getAuthHeaders()['X-Auth-Key'] || null) {
+    // Only initialization is shared; each request() opens its own WebSocket session.
+    wasmClient ||= import('/static/wasm/cvse_wasm_client.js').then(async module => {
+        await module.default();
+        return module.request;
+    }).catch(error => {
+        wasmClient = null;
+        throw error;
+    });
+    const request = await wasmClient;
     try {
-        result = await response.json();
-    } catch {
-        result = null;
+        return await request(method, params, auth);
+    } catch (error) {
+        // wasm-bindgen rejects with a JS string rather than an Error.
+        throw typeof error === 'string' ? new Error(error) : error;
     }
-
-    if (!response.ok) {
-        const message = result?.error
-            ? `HTTP ${response.status} ${result.error}`
-            : `HTTP ${response.status} ${response.statusText || fallbackMessage}`;
-        throw new Error(message);
-    }
-
-    if (result && result.success === false) {
-        throw new Error(result.error || fallbackMessage);
-    }
-
-    return result;
 }
 
 export async function validateAuthKey(authKey) {
-    const response = await fetch('/api/auth/validate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ auth_key: authKey })
-    });
-    return parseJsonResponse(response, '验证失败');
+    // Read-only RPCs do not authenticate; even a successful read cannot verify this key.
+    return { success: true, valid: false, message: '只读 RPC 无法验证 API Key 权限；需服务端验证或经授权的写入才能确认。' };
 }
 
 const pendingVideoRequests = new Map();
 export function getVideos(params) {
     const query = new URLSearchParams(params);
-    const headers = getAuthHeaders();
-    const key = JSON.stringify([query.toString(), headers]);
+    const auth = getAuthHeaders()['X-Auth-Key'] || null;
+    const key = JSON.stringify([query.toString(), auth]);
     if (pendingVideoRequests.has(key)) return pendingVideoRequests.get(key);
     const promise = (async () => {
         try {
-            const response = await fetch(`/api/videos?${query.toString()}`, { headers });
-            return await parseJsonResponse(response, '加载失败');
+            return await rpcRequest('getVideos', {
+                ...Object.fromEntries(query),
+                page: Number(query.get('page') || 1),
+                page_size: Number(query.get('page_size') || 20),
+            }, auth);
         } finally { pendingVideoRequests.delete(key); }
     })();
     pendingVideoRequests.set(key, promise);
@@ -48,41 +45,22 @@ export function getVideos(params) {
 }
 
 export async function getVideo(bvid) {
-    const response = await fetch(`/api/video/${bvid}`, {
-        headers: getAuthHeaders()
-    });
-    return parseJsonResponse(response, '获取视频数据失败');
+    return rpcRequest('getVideo', { bvid });
 }
 
 export async function submitChanges(changes) {
-    const response = await fetch('/api/submit-changes', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            ...getAuthHeaders()
-        },
-        body: JSON.stringify({ changes })
-    });
-    const result = await parseJsonResponse(response, '提交失败');
+    const result = await rpcRequest('submitChanges', { changes });
     previewSpecialCache.clear();
     return result;
 }
 
 export async function calculateRankings({ rank, index, containUnexamined = true, lock = false }) {
-    const response = await fetch('/api/calculate-rankings', {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            ...getAuthHeaders()
-        },
-        body: JSON.stringify({
-            rank,
-            index,
-            contain_unexamined: containUnexamined,
-            lock,
-        })
+    const result = await rpcRequest('calculateRankings', {
+        rank,
+        index,
+        contain_unexamined: containUnexamined,
+        lock,
     });
-    const result = await parseJsonResponse(response, '计算失败');
     previewSpecialCache.clear();
     return result;
 }
@@ -114,10 +92,20 @@ export function getRankingPreview({ rank, index, page, pageSize, videoId = '', c
         let timedOut = false;
         const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 40000);
         try {
-            const response = await fetch(`/api/ranking-preview?${query.toString()}`, {
-                headers: getAuthHeaders(), signal: controller.signal
+            // WASM cannot close an in-flight RPC; reject locally and ignore its late result.
+            const result = await new Promise((resolve, reject) => {
+                const onAbort = () => reject(new DOMException('Aborted', 'AbortError'));
+                controller.signal.addEventListener('abort', onAbort, { once: true });
+                rpcRequest('getRankingPreview', {
+                    ...Object.fromEntries(query),
+                    index: Number(index), page: Number(page), page_size: Number(pageSize),
+                    ...(cursor ? { cursor_rank: Number(cursor.rank), cursor_offset: Number(cursor.offset) } : {}),
+                    ...(query.has('include_special') ? { include_special: true } : {}),
+                }).then(
+                    value => { controller.signal.removeEventListener('abort', onAbort); resolve(value); },
+                    error => { controller.signal.removeEventListener('abort', onAbort); reject(error); }
+                );
             });
-            const result = await parseJsonResponse(response, '获取预览失败');
             if (!videoId) {
                 const data = result?.data;
                 const cursor = data?.next_cursor;
@@ -150,38 +138,17 @@ export function getRankingPreview({ rank, index, page, pageSize, videoId = '', c
 }
 
 export async function sendDebugRequest(endpoint, paramsStr) {
-    let url = endpoint;
-    let options = { method: 'GET' };
-    const authHeaders = getAuthHeaders();
-
-    if (endpoint === '/api/video/BVxxx') {
-        url = `/api/video/BVxxxxxx`;
-    } else if (endpoint === '/api/submit-changes' || endpoint === '/api/calculate-rankings') {
-        options = {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                ...authHeaders
-            },
-            body: paramsStr || '{}'
-        };
-    } else if (endpoint === '/api/videos' && paramsStr) {
-        const params = JSON.parse(paramsStr);
-        const query = new URLSearchParams(params).toString();
-        url = `/api/videos?${query}`;
-        options.headers = authHeaders;
-    } else {
-        options.headers = authHeaders;
-    }
-
-    const startTime = performance.now();
-    const response = await fetch(url, options);
-    const endTime = performance.now();
-    const result = await response.json();
-
-    return {
-        status: response.status,
-        duration: (endTime - startTime).toFixed(0),
-        result,
+    const methods = {
+        '/api/videos': 'getVideos',
+        '/api/video/BVxxx': 'getVideo',
+        '/api/ranking-preview': 'getRankingPreview',
+        '/api/submit-changes': 'submitChanges',
+        '/api/calculate-rankings': 'calculateRankings',
     };
+    const method = methods[endpoint];
+    if (!method) throw new Error(`不支持的 RPC 调试端点: ${endpoint}`);
+    const params = method === 'getVideo' ? { bvid: 'BVxxxxxx' } : (paramsStr ? JSON.parse(paramsStr) : {});
+    const startTime = performance.now();
+    const result = await rpcRequest(method, params);
+    return { status: 200, duration: (performance.now() - startTime).toFixed(0), result };
 }
